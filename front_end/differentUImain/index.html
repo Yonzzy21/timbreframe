@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="./styles.css">
+    <title>24-Channel Sine Generator</title>
+    <script src="https://cdn.jsdelivr.net/npm/nexusui@latest/dist/NexusUI.js"></script>
+</head>
+<body>
+    <main class="app-shell">
+        <header class="app-header">
+            <h1>Preset-driven 24-Channel Sine Generator</h1>
+            <p class="description">
+                This page loads a preset from <code>presets.json</code>, creates one sine oscillator per frequency,
+                and gives you sliders to control each frequency's level.
+            </p>
+        </header>
+
+        <section class="controls">
+            <div class="control-row">
+                <label for="presetSelect">Choose preset:</label>
+                <select id="presetSelect"></select>
+            </div>
+
+            <div class="control-row">
+                <label for="durationInput">Duration:</label>
+                <input id="durationInput" type="range" min="0.5" max="60" step="0.1">
+                <span id="durationValue">8.0s</span>
+            </div>
+
+            <div class="control-row toggle-row">
+                <label class="toggle-label" for="stereoPreview">
+                    <input id="stereoPreview" type="checkbox">
+                    <span>Stereo preview</span>
+                </label>
+            </div>
+
+            <div class="button-row">
+                <button id="startButton">Start audio</button>
+                <button id="stopButton" disabled>Stop audio</button>
+                <button id="resetButton">Reload preset defaults</button>
+            </div>
+            <div class="control-row envelope-row">
+                <label>ADSR Envelope:</label>
+                <label class="small-inline"><input id="adsrInteractive" type="checkbox"> Interactive ADSR</label>
+                <div id="envelope-container"></div>
+            </div>
+
+            <div class="info-row">
+                <p id="infoText">Loading presets…</p>
+                <p id="outputText">Output channels: 24 (if supported)</p>
+            </div>
+        </section>
+
+        <section class="sliders-section">
+            <h2>Frequency sliders</h2>
+            <p class="small-note">Move each slider to change the level of that frequency. Each slider maps to one output channel.</p>
+            <div id="sliders" class="slider-grid"></div>
+            <h2>Magnitude sliders</h2>
+            <div id="magnitude-multislider"></div>
+        </section>
+    </main>
+
+    <script src="./main.js"></script>
+
+</body>
+</html>
