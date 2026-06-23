@@ -13,8 +13,8 @@
         },
         "vibrato": {
             "frequency": 4.0,
-            "magnitude": 0.11,
-            "attack_time": 2.0
+            "magnitude": 3.0,
+            "attack_time": 0.2
         },
         "amplitude_modulation": {
             "frequency": 5.0,
