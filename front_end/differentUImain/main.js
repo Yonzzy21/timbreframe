@@ -2,6 +2,8 @@
 // Keep this at 24 for the real installation, but allow a stereo preview mode for testing.
 const NUM_OUTPUTS = 24;
 const PRESET_URL = 'presets.json';
+// Default hold time used by ADSR envelope UI mapping (seconds)
+const ADSR_HOLD = 0.1;
 
 // Grab DOM elements by their IDs so we can update the page from JavaScript.
 const presetSelect = document.getElementById('presetSelect');
@@ -30,7 +32,196 @@ let adsrEnvelope = null; // Holds our interactive Nexus.Envelope instance
 let magMultislider = null; // 👈 Add this here globally
 let adsrSetInProgress = false; // Guard to avoid recursion when we call setPoints
 let adsrInteractiveEnabled = false; // Controlled by UI checkbox; default false to act as visualizer only
-const ADSR_HOLD = 0.5; // visual sustain plateau length in seconds (kept consistent)
+let visualAnalyser = null; // AnalyserNode used for the visualizer
+let visualizerAnimationId = null;
+let visualizerSettings = {
+    barColor: '#d76315',
+    bgColor: 'rgba(18,28,44,0.95)',
+    scale: 'dB', // 'dB' or 'linear'
+    freqScale: 'log' // 'linear' or 'log' frequency axis
+};
+// Whether to visualize power magnitude (true => square of amplitude)
+visualizerSettings.power = true;
+// Spectrogram options
+visualizerSettings.perBin = true; // map one analyser bin -> one vertical pixel row
+visualizerSettings.halfSum = 1;   // aggregate ±halfSum FFT bins when computing energy
+let specAnimId = null; // Animation frame id for spectrogram
+
+function stopSpectrogram() {
+    // Stop the spectrogram animation if running
+    if (specAnimId) {
+        cancelAnimationFrame(specAnimId);
+        specAnimId = null;
+    }
+}
+
+// Start a simple canvas-based spectrogram using the existing `visualAnalyser`.
+function startSpectrogram() {
+    const canvas = document.getElementById('spectrumCanvas');
+    if (!canvas || !visualAnalyser || !audioContext) return;
+    const ctx = canvas.getContext('2d');
+    const binCount = visualAnalyser.frequencyBinCount;
+    const floatData = new Float32Array(binCount);
+
+    // Size canvas to CSS pixels if not already sized
+    canvas.width = Math.max(200, canvas.clientWidth || 300);
+    canvas.height = Math.max(128, canvas.clientHeight || 128);
+    const w = canvas.width;
+    const h = canvas.height;
+
+    if (specAnimId) cancelAnimationFrame(specAnimId);
+    const sampleRate = (audioContext && audioContext.sampleRate) || 44100;
+    const nyquist = sampleRate / 2;
+    const minFreq = 20;
+    const max_freq = 8000
+    const logmin = Math.log10(minFreq);
+    const logmax = Math.log10(max_freq);
+
+    function draw() {
+        visualAnalyser.getFloatFrequencyData(floatData);
+
+        // Scroll left one pixel
+        ctx.drawImage(canvas, 1, 0, w - 1, h, 0, 0, w - 1, h);
+        ctx.clearRect(w - 1, 0, 1, h);
+
+        const minDb = visualAnalyser.minDecibels ?? -120;
+        const maxDb = visualAnalyser.maxDecibels ?? -10;
+
+        // Draw bins as 1px rows (high freq at top)
+        for (let y = 0; y < h; y++) {
+            const percent = 1 - (y / (h - 1));
+            const logfreq = logmin + percent * (logmax - logmin);
+            const freq = Math.pow(10, logfreq);
+            const linear_bin = Math.round(freq/nyquist * (binCount - 1));
+            const clampedBin = Math.max(0, Math.min(binCount - 1, linear_bin));
+
+            const db = floatData[clampedBin];
+            let norm = (db - minDb) / (maxDb - minDb);
+            norm = Math.max(0, Math.min(1, norm));
+            ctx.fillStyle = ampToColor(norm);
+            ctx.fillRect(w - 1, y, 1, 1);
+        }
+
+        specAnimId = requestAnimationFrame(draw);
+    }
+
+    specAnimId = requestAnimationFrame(draw);
+}
+
+function ampToColor(norm) {
+    const n = Math.max(0, Math.min(1, Number(norm) || 0));
+    const hue = 220 - Math.round(n * 220); // blue -> red
+    const light = Math.max(10, Math.round(25 + n * 50));
+    return `hsl(${hue} ${90}% ${light}%)`;
+}
+
+function startVisualizer() {
+    const canvas = document.getElementById('spectrumCanvas');
+    if (!canvas || !visualAnalyser) return;
+    const ctx = canvas.getContext('2d');
+    const sampleRate = (audioContext && audioContext.sampleRate) ? audioContext.sampleRate : 44100;
+    const binCount = visualAnalyser.frequencyBinCount;
+
+    const draw = () => {
+        const data = new Uint8Array(binCount);
+        visualAnalyser.getByteFrequencyData(data);
+
+        // determine frequencies to show: use channelSettings desiredFrequency if available
+        const freqs = channelSettings.length ? channelSettings.map(c => c.desiredFrequency) : (presets[currentPresetName]?.frequencies || []);
+        const N = Math.max(1, Math.min(freqs.length || NUM_OUTPUTS, freqs.length || NUM_OUTPUTS));
+
+        ctx.fillStyle = visualizerSettings.bgColor;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const barWidth = canvas.width / N;
+        for (let i = 0; i < N; i++) {
+            const freq = freqs[i] || 0;
+            const bin = freqToBin(freq, sampleRate, binCount);
+            const v = data[bin]; // 0-255
+
+            let norm = v / 255;
+            if (visualizerSettings.scale === 'dB') {
+                const minDb = visualAnalyser.minDecibels ?? -40;
+                const maxDb = visualAnalyser.maxDecibels ?? -15;
+                const db = (v / 255) * (maxDb - minDb) + minDb;
+                norm = (db - minDb) / (maxDb - minDb);
+            }
+
+            const barHeight = Math.max(2, Math.floor(norm * canvas.height));
+            const x = i * barWidth;
+            const y = canvas.height - barHeight;
+            ctx.fillStyle = visualizerSettings.barColor;
+            ctx.fillRect(x + 1, y, Math.floor(barWidth) - 2, barHeight);
+        }
+
+        visualizerAnimationId = requestAnimationFrame(draw);
+    };
+
+    if (visualizerAnimationId) cancelAnimationFrame(visualizerAnimationId);
+    visualizerAnimationId = requestAnimationFrame(draw);
+}
+
+function stopVisualizer() {
+    if (visualizerAnimationId) {
+        cancelAnimationFrame(visualizerAnimationId);
+        visualizerAnimationId = null;
+    }
+}
+
+// Create UI controls for the visualizer and wire up event handlers.
+function createVisualizerUI() {
+    const vizBarColor = document.getElementById('vizBarColor');
+    const vizBgColor = document.getElementById('vizBgColor');
+    const vizScale = document.getElementById('vizScale');
+    const canvas = document.getElementById('spectrumCanvas');
+
+    if (vizBarColor) {
+        vizBarColor.value = visualizerSettings.barColor || '#d76315';
+        vizBarColor.addEventListener('input', (e) => { visualizerSettings.barColor = e.target.value; });
+    }
+    if (vizBgColor) {
+        vizBgColor.value = visualizerSettings.bgColor || '#121c2c';
+        vizBgColor.addEventListener('input', (e) => { visualizerSettings.bgColor = e.target.value; if (canvas) canvas.style.background = e.target.value; });
+        if (canvas) canvas.style.background = visualizerSettings.bgColor;
+    }
+    if (vizScale) {
+        vizScale.value = visualizerSettings.scale || 'dB';
+        vizScale.addEventListener('change', (e) => { visualizerSettings.scale = e.target.value; });
+    }
+
+    // Disable start until presets are loaded and a preset is selected.
+    if (startButton) startButton.disabled = true;
+}
+
+    // Add per-bin/hafSum controls to visualizer-controls container
+    const vizControls = document.getElementById('visualizer-controls');
+    if (vizControls && !document.getElementById('vizPerBin')) {
+        const perBinLabel = document.createElement('label');
+        perBinLabel.style.display = 'inline-flex';
+        perBinLabel.style.alignItems = 'center';
+        perBinLabel.style.gap = '8px';
+        perBinLabel.innerHTML = 'Per-bin <input id="vizPerBin" type="checkbox">';
+        vizControls.appendChild(perBinLabel);
+
+        const halfSumLabel = document.createElement('label');
+        halfSumLabel.style.display = 'inline-flex';
+        halfSumLabel.style.alignItems = 'center';
+        halfSumLabel.style.gap = '8px';
+        halfSumLabel.innerHTML = 'HalfSum <input id="vizHalfSum" type="range" min="0" max="8" step="1" value="' + (visualizerSettings.halfSum || 1) + '">';
+        vizControls.appendChild(halfSumLabel);
+
+        const perBinCheckbox = document.getElementById('vizPerBin');
+        const halfSumRange = document.getElementById('vizHalfSum');
+        if (perBinCheckbox) {
+            perBinCheckbox.checked = !!visualizerSettings.perBin;
+            perBinCheckbox.addEventListener('change', (e) => { visualizerSettings.perBin = e.target.checked; });
+        }
+        if (halfSumRange) {
+            halfSumRange.addEventListener('input', (e) => { visualizerSettings.halfSum = Number(e.target.value); });
+        }
+    }
+
+ 
 
 function setEnvelopeFromPreset(preset) {
     if (!adsrEnvelope || !preset?.adsr) return;
@@ -73,24 +264,15 @@ function linearToDb(linear) {
     if (linear <= 0.001) return -60; // Floor it out to prevent negative infinity errors
     return 20 * Math.log10(linear);
 }
-// Load presets.json and fill the preset selector.
 async function loadPresets() {
     try {
-        const response = await fetch(PRESET_URL); // Fetch the JSON file.
-        if (!response.ok) {
-            throw new Error(`Could not load presets: ${response.status}`);
-        }
-
-        presets = await response.json(); // Parse the JSON.
-        // Keep a deep copy of the originals so 'reset to default' can restore them even after in-session edits
+        const response = await fetch(PRESET_URL);
+        if (!response.ok) throw new Error(`Could not load presets: ${response.status}`);
+        presets = await response.json();
         originalPresets = JSON.parse(JSON.stringify(presets));
-        const presetNames = Object.keys(presets); // Get preset keys.
+        const presetNames = Object.keys(presets);
+        if (!presetNames.length) throw new Error('No presets found in presets.json');
 
-        if (!presetNames.length) {
-            throw new Error('No presets found in presets.json');
-        }
-
-        // Create one <option> for each preset.
         presetNames.forEach((key) => {
             const option = document.createElement('option');
             option.value = key;
@@ -98,12 +280,12 @@ async function loadPresets() {
             presetSelect.appendChild(option);
         });
 
-        currentPresetName = presetNames[0]; // Pick the first preset by default.
+        currentPresetName = presetNames[0];
         presetSelect.value = currentPresetName;
 
         presetSelect.addEventListener('change', () => {
-            currentPresetName = presetSelect.value; // Update selected preset.
-            updatePresetUI(presets[currentPresetName]); // Rebuild the sliders.
+            currentPresetName = presetSelect.value;
+            updatePresetUI(presets[currentPresetName]);
         });
 
         durationInput.addEventListener('input', () => {
@@ -113,7 +295,6 @@ async function loadPresets() {
 
         stereoPreviewCheckbox.addEventListener('change', () => {
             stereoPreviewEnabled = stereoPreviewCheckbox.checked;
-
             if (currentPresetName && presets[currentPresetName]) {
                 if (channels.length > 0) {
                     cleanupAudioGraph();
@@ -133,18 +314,19 @@ async function loadPresets() {
 
         resetButton.addEventListener('click', () => {
             if (!currentPresetName) return;
-            // Restore the preset object from the original copy, then update the UI (this also resets ADSR visualizer)
             if (originalPresets && originalPresets[currentPresetName]) {
                 presets[currentPresetName] = JSON.parse(JSON.stringify(originalPresets[currentPresetName]));
             }
-            updatePresetUI(presets[currentPresetName]); // Reload preset defaults without changing selection.
+            updatePresetUI(presets[currentPresetName]);
         });
 
-        updatePresetUI(presets[currentPresetName]); // Show the first preset in the UI.
+        updatePresetUI(presets[currentPresetName]);
         infoText.textContent = `Loaded ${presetNames.length} presets from presets.json.`;
+        // Enable Start button now that presets are loaded and a preset is selected
+        if (startButton) startButton.disabled = false;
     } catch (error) {
         infoText.textContent = `Error loading presets: ${error.message}`;
-        console.error(error); // Print error details to the console.
+        console.error(error);
     }
 }
 
@@ -266,7 +448,7 @@ function updatePresetUI(preset) {
     const dbValues = magnitudes.map(mag => linearToDb(mag));
     // 2. Initialize the Multislider component
     magMultislider = new Nexus.Multislider(multisliderContainer, {
-        size: [600, 200],         // [Width, Height] - Make it wide and tall!
+        size: [600, 400],         // [Width, Height] - Make it wide and tall!
         numberOfSliders: frequencies.length, // Automatically scales to match your preset (e.g., 24)
         min: -60,
         max: 0,
@@ -276,24 +458,40 @@ function updatePresetUI(preset) {
 
     magMultislider.colorize("accent", "#d76315");
 
+    // Treat very low dB values as exact silence to avoid audible remnants.
+    const SILENCE_THRESHOLD = 1e-6; // linear amplitude below this is treated as 0
+    const SILENCE_DB_THRESHOLD = -59.99; // dB values at or below this are treated as silence
     magMultislider.on('change', (matrixValues) => {
-    // Since 'matrixValues' is a raw array of 24 numbers, we loop through all of them    
-    console.log(matrixValues);
+    // Since 'matrixValues' may be an array of numbers or arrays, normalize defensively
+    console.log('Multislider change:', matrixValues);
     matrixValues.forEach((newDb, channelIndex) => {
-        const linearMagnitude = dbToLinear(newDb);
+        // Normalize possible nested array values
+        let dbVal = newDb;
+        if (Array.isArray(dbVal)) dbVal = dbVal[0];
+        dbVal = Number(dbVal);
+        if (!Number.isFinite(dbVal)) dbVal = -60;
+
+        // If the dB reading is effectively the minimum, treat it as exact silence.
+        let linearMagnitude = 0;
+        if (dbVal > SILENCE_DB_THRESHOLD) {
+            linearMagnitude = dbToLinear(dbVal);
+            if (linearMagnitude < SILENCE_THRESHOLD) linearMagnitude = 0;
+        }
+
         if (channelSettings[channelIndex]) {
             channelSettings[channelIndex].desiredMagnitude = linearMagnitude;
         }
-        //2 adjust the live audio volum node
+
+        // Adjust the live audio gain node immediately to avoid residual leakage
         if (channels[channelIndex] && channels[channelIndex].sliderGain) {
             const gainParam = channels[channelIndex].sliderGain.gain;
             const now = audioContext?.currentTime || 0;
-            
             gainParam.cancelScheduledValues(now);
-            gainParam.setValueAtTime(gainParam.value, now);
+            gainParam.setValueAtTime(linearMagnitude, now);
             gainParam.linearRampToValueAtTime(linearMagnitude, now + 0.02);
+            console.log('Applied gain -> channel', channelIndex, 'db', dbVal, 'linear', linearMagnitude);
         }
-        });
+    });
     });
     // Synchronize visual ADSR graph coordinates with the loaded preset data
     if (adsrEnvelope && preset.adsr) {
@@ -385,9 +583,15 @@ function cleanupAudioGraph() {
         masterGain = null;
     }
 
+    // spectrogram renderer removed — nothing to stop
+
     channels = []; // Reset channel array.
     startButton.disabled = false; // Allow start again.
     stopButton.disabled = true; // Disable stop until next play.
+
+    // Stop visualizer and spectrogram
+    try { stopVisualizer(); } catch (err) { }
+    try { stopSpectrogram(); } catch (err) { }
 }
 
 function fadeOutAndCleanup(fadeDuration = 0.02) {
@@ -418,6 +622,7 @@ function fadeOutAndCleanup(fadeDuration = 0.02) {
 // Build the full audio graph for the selected preset.
 function createAudioGraph(preset) {
     const context = getAudioContext(preset.audio_settings?.sr || 44100);
+    console.log('createAudioGraph: sampleRate=', context.sampleRate, 'stereoPreview=', stereoPreviewEnabled);
     const duration = currentDuration;
     const livePresetData = presets[currentPresetName] || preset;
     const adsr = {
@@ -440,7 +645,23 @@ function createAudioGraph(preset) {
 
     masterGain = context.createGain(); // Final output gain.
     masterGain.gain.value = 0.35; // Keep overall loudness reasonable.
+
     masterGain.connect(context.destination); // Send master to speakers.
+
+    // Create/create-or-reuse an analyser for visualizations
+    try {
+        visualAnalyser = context.createAnalyser();
+        visualAnalyser.fftSize = 4096;
+        // Use a wider dB range so quiet and loud partials are both visible
+        visualAnalyser.minDecibels = -120;
+        visualAnalyser.maxDecibels = -10;
+        // Connect masterGain to analyser so it sees the final mix
+        masterGain.connect(visualAnalyser);
+    } catch (err) {
+        console.warn('Failed to create visual analyser:', err);
+        visualAnalyser = null;
+    }
+
 
     if (!stereoPreviewEnabled) {
         mergerNode = context.createChannelMerger(NUM_OUTPUTS); // Create 24 input channels for the real multichannel path.
@@ -467,7 +688,14 @@ function createAudioGraph(preset) {
         osc.frequency.value = desiredFrequency; // Use the current slider frequency.
 
         const sliderGain = context.createGain();
-        sliderGain.gain.value = desiredMagnitude; // Use the current slider magnitude.
+        // Ensure no previously scheduled ramps remain and set the initial gain explicitly
+        try {
+            sliderGain.gain.cancelScheduledValues(context.currentTime);
+            sliderGain.gain.setValueAtTime(desiredMagnitude, context.currentTime);
+        } catch (err) {
+            sliderGain.gain.value = desiredMagnitude;
+        }
+        console.log('createAudioGraph: channel', index, 'desiredMagnitude', desiredMagnitude);
 
         const amGain = context.createGain();
         amGain.gain.setValueAtTime(1.0, startTime); // Base amplitude modulation envelope.
@@ -525,6 +753,10 @@ function createAudioGraph(preset) {
         amOsc.stop(endTime + 0.05);
     });
 
+    // Nexus spectrogram disabled — no analyser connection required here
+
+
+
     stopTimeoutId = setTimeout(() => {
         cleanupAudioGraph();
         outputText.textContent = 'Audio finished.';
@@ -533,6 +765,7 @@ function createAudioGraph(preset) {
 
 // Start audio playback for the current preset.
 function startAudio() {
+    console.log('startAudio: preset=', currentPresetName, 'audioContextState=', audioContext?.state);
     if (!currentPresetName) {
         return; // Nothing selected.
     }
@@ -543,12 +776,25 @@ function startAudio() {
         return;
     }
 
+    const context = getAudioContext(preset.audio_settings?.sr || 44100);
+
     if (audioContext && audioContext.state === 'suspended') {
         audioContext.resume(); // Resume if the context was paused.
     }
 
+    // spectrogram disabled: remove placeholder content if present
+    const _targetEl = document.getElementById('target');
+    if (_targetEl) _targetEl.innerHTML = '';
+
     cleanupAudioGraph(); // Remove any previous audio graph.
     createAudioGraph(preset); // Build a fresh graph.
+
+    // Start spectrogram visualization if available
+    if (typeof startSpectrogram === 'function') {
+        try { startSpectrogram(); } catch (err) { console.warn('Failed to start spectrogram:', err); }
+    } else {
+        console.warn('startSpectrogram not available.');
+    }
 
     startButton.disabled = true;
     stopButton.disabled = false;
@@ -589,6 +835,7 @@ function initUI() {
     adsrEnvelope = new Nexus.Envelope('envelope-container', {
         size: [382, 102], 
         noUi: false,      
+        bg: 'rgba(254, 10, 10, 0.2)', // 💡 ADD THIS: Makes the canvas background dark/semi-transparent!
         points: [         
             { x: 0.0, y: 0.0 },  
             { x: 0.1, y: 1.0 },  
@@ -677,6 +924,7 @@ function initUI() {
     });
 
     // 3. ONLY start loading presets once all the HTML containers are safely in memory!
+    createVisualizerUI();
     loadPresets();
 }
 

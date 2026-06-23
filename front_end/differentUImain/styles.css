@@ -131,7 +131,6 @@ button:disabled {
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 16px;
-    padding: 16px;
     box-sizing: border-box;
 }
 
@@ -173,13 +172,12 @@ button:disabled {
 }
 /* Ensure the container layout maps space correctly */
 #envelope-container {
-    width: 100%;
+    width: 382px;
+    height: 102px;
     max-width: 400px; /* Keeps it tight and clean next to options */
-    height: 120px;
     background: rgba(20, 24, 34, 0.6);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 14px;
-    padding: 8px;
     box-sizing: border-box;
 }
 

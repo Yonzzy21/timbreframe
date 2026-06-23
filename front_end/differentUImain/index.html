@@ -18,6 +18,13 @@
         </header>
 
         <section class="controls">
+
+            <div class="control-row" id="visualizer-controls">
+                <label style="min-width:120px;">Visualizer:</label>
+                <label style="display:inline-flex;align-items:center;gap:8px;">Bar color <input id="vizBarColor" type="color" value="#d76315"></label>
+                <label style="display:inline-flex;align-items:center;gap:8px;">BG color <input id="vizBgColor" type="color" value="#121c2c"></label>
+                <label style="display:inline-flex;align-items:center;gap:8px;">Scale <select id="vizScale"><option value="dB">dB</option><option value="linear">Linear</option></select></label>
+            </div>
             <div class="control-row">
                 <label for="presetSelect">Choose preset:</label>
                 <select id="presetSelect"></select>
@@ -47,6 +54,7 @@
                 <div id="envelope-container"></div>
             </div>
 
+
             <div class="info-row">
                 <p id="infoText">Loading presets…</p>
                 <p id="outputText">Output channels: 24 (if supported)</p>
@@ -58,7 +66,10 @@
             <p class="small-note">Move each slider to change the level of that frequency. Each slider maps to one output channel.</p>
             <div id="sliders" class="slider-grid"></div>
             <h2>Magnitude sliders</h2>
-            <div id="magnitude-multislider"></div>
+            <div id="magnitude-multislider" style="max-width: 600px; margin-bottom: 20px;"></div>   
+            <canvas id="spectrumCanvas"
+                width="600"
+                height="300" style="width:100%;height:300px;display:block;margin-top:40px;border-radius:8px;background:#121c2c"></canvas>
         </section>
     </main>
 
