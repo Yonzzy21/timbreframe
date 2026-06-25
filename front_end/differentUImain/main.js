@@ -33,6 +33,7 @@ let magMultislider = null; // 👈 Add this here globally
 let adsrSetInProgress = false; // Guard to avoid recursion when we call setPoints
 let adsrInteractiveEnabled = false; // Controlled by UI checkbox; default false to act as visualizer only
 let visualAnalyser = null; // AnalyserNode used for the visualizer
+let vizMixer = null;       // 👈 ADD THIS HERE
 let visualizerAnimationId = null;
 let visualizerSettings = {
     barColor: '#d76315',
@@ -547,31 +548,20 @@ function cleanupAudioGraph() {
     }
 
     channels.forEach((channel) => {
-        try {
-            channel.osc.stop();
-        } catch (error) {
-            // Already stopped, ignore.
-        }
-        try {
-            channel.vibOsc.stop();
-        } catch (error) {
-            // Already stopped, ignore.
-        }
-        try {
-            channel.amOsc.stop();
-        } catch (error) {
-            // Already stopped, ignore.
-        }
+        try { channel.osc.stop(); } catch (e) {}
+        try { channel.vibOsc.stop(); } catch (e) {}
+        try { channel.amOsc.stop(); } catch (e) {}
 
-        channel.osc.disconnect();
-        channel.vibOsc.disconnect();
-        channel.amOsc.disconnect();
-        channel.sliderGain.disconnect();
-        channel.amGain.disconnect();
-        channel.envGain.disconnect();
-        if (channel.panner) {
-            channel.panner.disconnect();
-        }
+        // Disconnect EVERYTHING tracked in the loop
+        try { channel.osc.disconnect(); } catch (e) {}
+        try { channel.vibOsc.disconnect(); } catch (e) {}
+        try { channel.amOsc.disconnect(); } catch (e) {}
+        try { channel.sliderGain.disconnect(); } catch (e) {}
+        try { channel.amGain.disconnect(); } catch (e) {}
+        try { channel.envGain.disconnect(); } catch (e) {}
+        if (channel.installationVolumeScaler) channel.installationVolumeScaler.disconnect();
+        if (channel.vizSplitter) channel.vizSplitter.disconnect();
+        if (channel.panner) channel.panner.disconnect();
     });
 
     if (mergerNode) {
@@ -582,14 +572,21 @@ function cleanupAudioGraph() {
         masterGain.disconnect();
         masterGain = null;
     }
-
-    // spectrogram renderer removed — nothing to stop
+    
+    // 👇 ADD THESE TO KILL THE GHOST NODES
+    if (vizMixer) {
+        vizMixer.disconnect();
+        vizMixer = null;
+    }
+    if (visualAnalyser) {
+        visualAnalyser.disconnect();
+        visualAnalyser = null;
+    }
 
     channels = []; // Reset channel array.
-    startButton.disabled = false; // Allow start again.
-    stopButton.disabled = true; // Disable stop until next play.
+    startButton.disabled = false; 
+    stopButton.disabled = true; 
 
-    // Stop visualizer and spectrogram
     try { stopVisualizer(); } catch (err) { }
     try { stopSpectrogram(); } catch (err) { }
 }
@@ -621,8 +618,21 @@ function fadeOutAndCleanup(fadeDuration = 0.02) {
 
 // Build the full audio graph for the selected preset.
 function createAudioGraph(preset) {
+    channels = [];
     const context = getAudioContext(preset.audio_settings?.sr || 44100);
     console.log('createAudioGraph: sampleRate=', context.sampleRate, 'stereoPreview=', stereoPreviewEnabled);
+    // 👇 FIX: Only request 24 channels if we are NOT in stereo preview mode
+    if (!stereoPreviewEnabled) {
+        context.destination.channelCount = NUM_OUTPUTS; // 24
+        context.destination.channelCountMode = 'explicit';
+        context.destination.channelInterpretation = 'discrete';
+    } else {
+        context.destination.channelCount = 2; // Stereo for headphones
+        context.destination.channelCountMode = 'explicit';
+        context.destination.channelInterpretation = 'speakers';
+    }
+
+    
     const duration = currentDuration;
     const livePresetData = presets[currentPresetName] || preset;
     const adsr = {
@@ -644,31 +654,38 @@ function createAudioGraph(preset) {
         depth: livePresetData.amplitude_modulation?.depth ?? 0.065,
     };
 
-    masterGain = context.createGain(); // Final output gain.
-    masterGain.gain.value = 0.35; // Keep overall loudness reasonable.
+    // 2. SET UP THE AUDIO OUTLETS & VISUALIZER DOWNMIX
+    // Create a dedicated downmix node explicitly for the spectrogram/visualizer
 
-    masterGain.connect(context.destination); // Send master to speakers.
+    vizMixer = context.createGain();
+    vizMixer.gain.value = 0.35; // Global scaling so the visualizer doesn't clip
 
-    // Create/create-or-reuse an analyser for visualizations
+    if (!stereoPreviewEnabled) {
+        // Installation Mode: Create the single 24-input hardware merger
+        mergerNode = context.createChannelMerger(NUM_OUTPUTS);
+        mergerNode.channelCountMode = 'explicit';
+        mergerNode.channelInterpretation = 'discrete';
+        
+        // Connect the merger directly to the hardware (bypassing any 16-ch node limits)
+        mergerNode.connect(context.destination);
+    } else {
+        // Stereo Testing Fallback
+        masterGain = context.createGain(); 
+        masterGain.gain.value = 0.35; 
+        masterGain.connect(context.destination);
+        masterGain.connect(vizMixer); // Send stereo preview to the visualizer mix
+    }
+
+    // 3. INITIALIZE THE VISUAL ANALYSER SAFELY IN STEREO
     try {
         visualAnalyser = context.createAnalyser();
         visualAnalyser.fftSize = 4096;
-        // Use a wider dB range so quiet and loud partials are both visible
         visualAnalyser.minDecibels = -120;
         visualAnalyser.maxDecibels = -10;
-        // Connect masterGain to analyser so it sees the final mix
-        masterGain.connect(visualAnalyser);
+        vizMixer.connect(visualAnalyser); // The spectrogram reads the stereo mixdown node
     } catch (err) {
         console.warn('Failed to create visual analyser:', err);
         visualAnalyser = null;
-    }
-
-
-    if (!stereoPreviewEnabled) {
-        mergerNode = context.createChannelMerger(NUM_OUTPUTS); // Create 24 input channels for the real multichannel path.
-        mergerNode.channelCountMode = 'explicit';
-        mergerNode.channelInterpretation = 'discrete';
-        mergerNode.connect(masterGain); // Merge 24 channels into master.
     }
 
     const frequencies = preset.frequencies || [];
@@ -709,20 +726,13 @@ function createAudioGraph(preset) {
         amOscGain.gain.value = amplitudeMod.depth;
         amOsc.connect(amOscGain).connect(amGain.gain); // AM oscillator modulates the gain.
         
-        const channelAttackDuration = adsr.attack_time +adsr.attack_per_partial * (harm_rank - 1);
+        const channelAttackDuration = adsr.attack_time + (adsr.attack_per_partial * (harm_rank - 1));
         const channelAttackEnd = startTime + channelAttackDuration;
         const channelDecayEnd = channelAttackEnd + adsr.decay_time;
         const channelSustainLevel = Math.max(adsr.sustain_level * Math.exp(-0.25 * (harm_rank - 1)), 0.1);
         const channelReleaseStart = Math.max(endTime - adsr.release_time, channelDecayEnd);
 
         const envGain = context.createGain();
-        console.log({
-            startTime,
-            channelAttackEnd,
-            channelDecayEnd,
-            channelSustainLevel
-        });
-
         envGain.gain.setValueAtTime(0.0, startTime); // Start silent.
         envGain.gain.linearRampToValueAtTime(1.0, channelAttackEnd); // Attack up.
         envGain.gain.linearRampToValueAtTime(channelSustainLevel, channelDecayEnd); // Decay to sustain.
@@ -730,13 +740,36 @@ function createAudioGraph(preset) {
         envGain.gain.linearRampToValueAtTime(0.0, endTime); // Release down.
 
         let panner = null;
+        let installationVolumeScaler = null;
+        let vizSplitter = null;
         if (stereoPreviewEnabled) {
             panner = context.createStereoPanner();
             panner.pan.value = frequencies.length > 1 ? ((index / (frequencies.length - 1)) * 2 - 1) : 0;
             osc.connect(sliderGain).connect(amGain).connect(envGain).connect(panner).connect(masterGain);
         } else {
-            // Signal path for the normal multichannel setup: oscillator -> slider gain -> AM -> envelope -> merger channel.
-            osc.connect(sliderGain).connect(amGain).connect(envGain).connect(mergerNode, 0, index);
+            envGain.channelCount = 1;
+            envGain.channelCountMode = 'explicit';
+            envGain.channelInterpretation = 'discrete';
+
+            const installationVolumeScaler = context.createGain();
+            installationVolumeScaler.channelCount = 1;
+            installationVolumeScaler.channelCountMode = 'explicit';
+            installationVolumeScaler.channelInterpretation = 'discrete';
+            installationVolumeScaler.gain.setValueAtTime(0.35, startTime);
+            osc.connect(sliderGain).connect(amGain).connect(envGain).connect(installationVolumeScaler);
+
+            // 🔥 FIX 2: Path A - Safely route the mono signal into its hardware lane (0 to 23)
+            installationVolumeScaler.connect(mergerNode, 0, index);
+            
+            const vizSplitter = context.createGain();
+            vizSplitter.channelCount = 1;
+            vizSplitter.channelCountMode = 'explicit';
+            vizSplitter.channelInterpretation = 'discrete';
+            vizSplitter.gain.setValueAtTime(1.0, startTime);
+            // 🔥 FIX 3: Path B - Safely route a copy of the mono signal into the visualizer mixdown
+            installationVolumeScaler.connect(vizSplitter);
+            vizSplitter.connect(vizMixer);
+
         }
 
         const vibOsc = context.createOscillator();
@@ -756,6 +789,8 @@ function createAudioGraph(preset) {
             amGain,
             envGain,
             panner,
+            installationVolumeScaler,
+            vizSplitter
         });
 
         osc.start(startTime);
@@ -766,6 +801,11 @@ function createAudioGraph(preset) {
         vibOsc.stop(endTime + 0.05);
         amOsc.stop(endTime + 0.05);
     });
+    // 6. ANIMATION INITIALIZATION
+    if (visualAnalyser) {
+        startVisualizer();
+        startSpectrogram();
+    }
 
     // Nexus spectrogram disabled — no analyser connection required here
 
