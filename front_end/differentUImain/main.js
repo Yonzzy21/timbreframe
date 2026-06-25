@@ -630,6 +630,7 @@ function createAudioGraph(preset) {
         decay_time: livePresetData.adsr?.decay_time ?? 0.6,
         sustain_level: livePresetData.adsr?.sustain_level ?? 0.7,
         release_time: Math.max(livePresetData.adsr?.release_time ?? 0.01, 0.01),
+        attack_per_partial: livePresetData.adsr?.attack_per_partial ?? 0.003 // 👈 ADD THIS LINE
     };
 
     const vibrato = {
@@ -682,7 +683,7 @@ function createAudioGraph(preset) {
     frequencies.forEach((frequency, index) => {
         const desiredFrequency = channelSettings[index]?.desiredFrequency ?? frequency;
         const desiredMagnitude = channelSettings[index]?.desiredMagnitude ?? (magnitudes[index] ?? 0.0);
-
+        const harm_rank = frequency / frequencies[0];
         const osc = context.createOscillator();
         osc.type = 'sine';
         osc.frequency.value = desiredFrequency; // Use the current slider frequency.
@@ -707,12 +708,25 @@ function createAudioGraph(preset) {
         const amOscGain = context.createGain();
         amOscGain.gain.value = amplitudeMod.depth;
         amOsc.connect(amOscGain).connect(amGain.gain); // AM oscillator modulates the gain.
+        
+        const channelAttackDuration = adsr.attack_time +adsr.attack_per_partial * (harm_rank - 1);
+        const channelAttackEnd = startTime + channelAttackDuration;
+        const channelDecayEnd = channelAttackEnd + adsr.decay_time;
+        const channelSustainLevel = Math.max(adsr.sustain_level * Math.exp(-0.25 * (harm_rank - 1)), 0.1);
+        const channelReleaseStart = Math.max(endTime - adsr.release_time, channelDecayEnd);
 
         const envGain = context.createGain();
+        console.log({
+            startTime,
+            channelAttackEnd,
+            channelDecayEnd,
+            channelSustainLevel
+        });
+
         envGain.gain.setValueAtTime(0.0, startTime); // Start silent.
-        envGain.gain.linearRampToValueAtTime(1.0, attackEnd); // Attack up.
-        envGain.gain.linearRampToValueAtTime(adsr.sustain_level, decayEnd); // Decay to sustain.
-        envGain.gain.setValueAtTime(adsr.sustain_level, releaseStart); // Hold sustain.
+        envGain.gain.linearRampToValueAtTime(1.0, channelAttackEnd); // Attack up.
+        envGain.gain.linearRampToValueAtTime(channelSustainLevel, channelDecayEnd); // Decay to sustain.
+        envGain.gain.setValueAtTime(channelSustainLevel, channelReleaseStart); // Hold sustain.
         envGain.gain.linearRampToValueAtTime(0.0, endTime); // Release down.
 
         let panner = null;

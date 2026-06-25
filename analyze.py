@@ -3,28 +3,77 @@ import json
 import numpy as np
 import librosa
 from scipy.signal import find_peaks
+import argparse
 
 # =====================================================================
 # 1. CENTRAL CONFIGURATION CONTROL PANEL (The Dashboard)
 # =====================================================================
 # To change the configuration, simply modify the values in this dictionary.
-INSTRUMENT_ID = "bass_clarinet"
-INSTRUMENT_NAME = "Bass Clarinet"
-INPUT_AUDIO_FILE = "./assets/chopped_clarinet.wav"
+# INSTRUMENT_ID = "bass_clarinet"
+# INSTRUMENT_NAME = "Bass Clarinet"
+# INPUT_AUDIO_FILE = "./assets/chopped_clarinet.wav"
 
-CONFIG = {
+# CONFIG = {
+#     "sr": 44100,
+#     "duration": 5.0,
+#     "vibrato_freq": 4.0,
+#     "vibrato_mag": 0.03,
+#     "vibrato_attack_time": 2.0,
+#     "am_freq": 5.0,
+#     "am_depth": 0.065,
+#     "attack_time": 0.1,
+#     "decay_time": 0.6,
+#     "sustain_level": 0.8,
+#     "release_time": 0.3
+# }
+
+
+DEFAULT_CONFIG = {
+    "instrument_id": "default_inst",
+    "instrument_name": "default_instrument",
+    "input_audio_file": "./assets/default_audio.wav",
     "sr": 44100,
-    "duration": 5.0,
+    "duration": 8.0,
     "vibrato_freq": 4.0,
-    "vibrato_mag": 0.03,
+    "vibrato_mag": 0.5,
     "vibrato_attack_time": 2.0,
     "am_freq": 5.0,
     "am_depth": 0.065,
-    "attack_time": 0.1,
-    "decay_time": 0.6,
+    "attack_time": 0.01,
+    "decay_time": 0.4,
     "sustain_level": 0.8,
-    "release_time": 0.3
+    "release_time": 0.15,
+    "attack_per_partial": 0.003
+    
 }
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Analyze audio with custom parameters.")
+    
+    # Strings
+    parser.add_argument("--id", dest="instrument_id", type=str, default=DEFAULT_CONFIG["instrument_id"])
+    parser.add_argument("--name", dest="instrument_name", type=str, default=DEFAULT_CONFIG["instrument_name"])
+    parser.add_argument("--audio", dest="input_audio_file", type=str, default=DEFAULT_CONFIG["input_audio_file"])
+    
+    # Ints & Floats
+    parser.add_argument("--sr", type=int, default=DEFAULT_CONFIG["sr"])
+    parser.add_argument("--duration", type=float, default=DEFAULT_CONFIG["duration"])
+    parser.add_argument("--vib-freq", dest="vibrato_freq", type=float, default=DEFAULT_CONFIG["vibrato_freq"])
+    parser.add_argument("--vib-mag", dest="vibrato_mag", type=float, default=DEFAULT_CONFIG["vibrato_mag"])
+    parser.add_argument("--vib-attack", dest="vibrato_attack_time", type=float, default=DEFAULT_CONFIG["vibrato_attack_time"])
+    
+    parser.add_argument("--am-freq", dest="am_freq", type=float, default=DEFAULT_CONFIG["am_freq"])
+    parser.add_argument("--am-depth", dest="am_depth", type=float, default=DEFAULT_CONFIG["am_depth"])
+    
+    parser.add_argument("--attack-time", dest="attack_time", type=float, default=DEFAULT_CONFIG["attack_time"])
+    parser.add_argument("--decay-time", dest="decay_time", type=float, default=DEFAULT_CONFIG["decay_time"])
+    parser.add_argument("--sustain-level", dest="sustain_level", type=float, default=DEFAULT_CONFIG["sustain_level"])
+    parser.add_argument("--release-time", dest="release_time", type=float, default=DEFAULT_CONFIG["release_time"])
+    parser.add_argument("--attack-per-partial", dest="attack_per_partial", type=float, default=DEFAULT_CONFIG["attack_per_partial"])
+    # ... (add other arguments similarly) ...
+    
+    return parser.parse_args()
 
 ###Helper functions for the specific instrument
 
@@ -81,13 +130,27 @@ def analyze_and_extract_peaks(file_path, sr, n_fft=4096, hop_length=1024):
 
     mag_mean = np.mean(mag, axis=1) ####Taking the mean of the magnitude across the time axis
     print(mag_mean.shape)
-    peaks, _ = find_peaks(mag_mean, distance=10, prominence=np.max(mag_mean)*0.006) ####frequency bins
-    if peaks.shape[0] > 24: ###maintains 24 peaks
-        peaks = peaks[:24] 
+    
+    peaks, _ = find_peaks(mag_mean, distance=6, prominence=np.max(mag_mean)*0.001) ####frequency bins
 
+    # 2. FIXED: Convert indices to frequencies to filter out sub-bass artifacts (< 150Hz)
+    peak_frequencies = peaks * freq_res
+    valid_indices = np.where(peak_frequencies >= 200)[0]
 
-    peak_to_hz = peaks *freq_res #converting peak indices to frequencies
+    peaks = peaks[valid_indices]
+    peak_to_hz = peak_frequencies[valid_indices] # converting peak indices to frequencies
     freq_mag_mean= mag_mean[peaks] ####Getting the mean magnitude at the peak frequencies
+
+
+    print(f"🔍 [DEBUG] initial find_peaks found: {len(peaks)} peaks") # Always prints
+
+    if peaks.shape[0] > 24:
+        print("✂️ [DEBUG] Truncating peaks array down to 24.",flush = True)
+        peaks = peaks[:24] 
+    elif peaks.shape[0] < 24:
+        print(f"⚠️ [WARNING] Only {peaks.shape[0]} peaks found, change params.",flush = True)
+    else:
+        print("🎯 [DEBUG] Exactly 24 perfect peaks found!",flush = True)
     return peak_to_hz, freq_mag_mean
 
 def export_instrument_preset(instrument_id, instrument_name, peak_to_hz, freq_mag_mean, config, json_path="presets.json"):
@@ -110,6 +173,7 @@ def export_instrument_preset(instrument_id, instrument_name, peak_to_hz, freq_ma
     decay = config.get("decay_time", 0.6)
     sustain = config.get("sustain_level", 0.7)
     release = config.get("release_time", 0.5)
+    attack_per_partial = config.get("attack_per_partial", 0.0)
 
     # 2. Re-create the temporary synthesis timeline to find the TRUE global max
     # (We must simulate the synthesis to know how the envelopes/modulations affect the peaks)
@@ -119,12 +183,34 @@ def export_instrument_preset(instrument_id, instrument_name, peak_to_hz, freq_ma
     
     # Re-create envelopes based on inputs
     vib_envelope = create_vibrato_envelope(duration=duration, sr=sr, vibrato_attack_time=vib_attack)
-    mag_envelope = create_adsr_envelope(duration, sr, attack_time=attack, decay_time=decay, release_time=release, sustain_level=sustain)
+    # mag_envelope = create_adsr_envelope(duration, sr, attack_time=attack, decay_time=decay, release_time=release, sustain_level=sustain)
 
     for i in range(len(peak_to_hz)):
         freqs = peak_to_hz[i]
         magnitude = freq_mag_mean[i]
         harm_rank = freqs / fund_freq
+
+
+
+        # --- DYNAMIC TRUMPET EMBELLISHMENTS ---
+        # 1. Sequential Attack: Stagger the attack slightly based on the harmonic rank
+        # Higher harmonics take a few milliseconds longer to fully blow open
+        channel_attack = attack + (attack_per_partial * (harm_rank - 1))
+        
+        # 2. Decay Drop: High harmonics drop radically lower during sustain
+        # Scaling factor pushes high rank sustains down aggressively (clamped to a minimum of 0.05)
+        channel_sustain = max(sustain * np.exp(-0.15 * (harm_rank - 1)), 0.05)
+        
+        # Generate a customized unique ADSR envelope for THIS specific channel
+        channel_mag_envelope = create_adsr_envelope(
+            duration=duration, 
+            sr=sr, 
+            attack_time=channel_attack, 
+            decay_time=decay, 
+            release_time=release, 
+            sustain_level=channel_sustain
+        )
+
 
         random_phase_offset = np.random.rand() * 2 * np.pi
         scaled_am_freq = am_freq + (0.1 * harm_rank)
@@ -134,7 +220,7 @@ def export_instrument_preset(instrument_id, instrument_name, peak_to_hz, freq_ma
         scaled_vib_magnitude = vib_mag * harm_rank * vib_envelope
 
         channel_wave = subtle_mag_mod * np.sin(2 * np.pi * freqs * t + scaled_vib_magnitude * np.sin(2 * np.pi * vib_freq * t))
-        multichannel_audio[i, :] = channel_wave * mag_envelope
+        multichannel_audio[i, :] = channel_wave * channel_mag_envelope
 
     # 3. System-Wide Multichannel Normalization
     global_max = np.max(np.abs(multichannel_audio))
@@ -160,7 +246,8 @@ def export_instrument_preset(instrument_id, instrument_name, peak_to_hz, freq_ma
             "attack_time": float(attack),
             "decay_time": float(decay),
             "sustain_level": float(sustain),
-            "release_time": float(release)
+            "release_time": float(release),
+            "attack_per_partial": float(attack_per_partial)
         },
         "vibrato": {
             "frequency": float(vib_freq),
@@ -196,15 +283,50 @@ def export_instrument_preset(instrument_id, instrument_name, peak_to_hz, freq_ma
     print(f"🎉 Success! '{instrument_name}' [ID: {instrument_id}] saved to {json_path}")
 
 if __name__ == "__main__":
-    print(f"Starting decomposition for: {INSTRUMENT_NAME}...")
+    # args = parse_args()
+ 
+    # print(f"Starting decomposition for: {args.name}...")
     
-    # Run the processing steps using your control panel variables
-    peaks, magnitudes = analyze_and_extract_peaks(INPUT_AUDIO_FILE, CONFIG["sr"])
+    # # Run the processing steps using your control panel variables
     
+    # # Now you access them like this:
+    # print(f"Analyzing {args.name} from {args.audio}")
+    # print(f"Sample Rate: {args.sr}, Vibrato Freq: {args.vib_freq}")
+    # peaks, magnitudes = analyze_and_extract_peaks(args.audio, args.sr)
+    # runtime_config = vars(args)
+    # export_instrument_preset(
+    #     instrument_id=args.id,
+    #     instrument_name=args.name,
+    #     peak_to_hz=peaks,
+    #     freq_mag_mean=magnitudes,
+    #     config=args
+    # )
+    # runtime_config = vars(args)
+    # print('args namespace:', args)
+    # print('args dict:', vars(args))
+    # print(runtime_config)
+
+    args = parse_args()
+    
+    # 1. Convert the namespace to a full configuration dictionary immediately
+    runtime_config = vars(args)
+ 
+    # 2. Use the updated dictionary keys for your print statements
+    print(f"Starting decomposition for: {runtime_config['instrument_name']}...")
+    print(f"Analyzing {runtime_config['instrument_name']} from {runtime_config['input_audio_file']}")
+    print(f"Sample Rate: {runtime_config['sr']}, Vibrato Freq: {runtime_config['vibrato_freq']}")
+    
+    # Run the feature analysis
+    peaks, magnitudes = analyze_and_extract_peaks(runtime_config['input_audio_file'], runtime_config['sr'])
+    
+    # 3. Pass the values and the dictionary cleanly into the exporter
     export_instrument_preset(
-        instrument_id=INSTRUMENT_ID,
-        instrument_name=INSTRUMENT_NAME,
+        instrument_id=runtime_config["instrument_id"],
+        instrument_name=runtime_config["instrument_name"],
         peak_to_hz=peaks,
         freq_mag_mean=magnitudes,
-        config=CONFIG
+        config=runtime_config  # This is now a dict, so .get() will work perfectly!
     )
+    
+    print('Runtime Configuration Profile:')
+    print(json.dumps(runtime_config, indent=2))
