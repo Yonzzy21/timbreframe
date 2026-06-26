@@ -351,6 +351,16 @@ function updatePresetUI(preset) {
         const row = document.createElement('div');
         row.className = 'slider-row';
 
+        // Stack elements vertically inside each grid cell to save maximum horizontal space
+        row.style.display = 'flex';
+        row.style.flexDirection = 'column'; 
+        row.style.alignItems = 'center';
+        row.style.justifyContent = 'center';
+        row.style.gap = '4px';             // Very tight internal spacing
+        row.style.padding = '5px';
+        row.style.background = '#1a233a';  // Optional: subtle card background for each channel
+        row.style.borderRadius = '6px';
+
         const label = document.createElement('label');
         label.textContent = `Channel ${index + 1}: ${frequency.toFixed(1)} Hz`;
 
@@ -362,16 +372,16 @@ function updatePresetUI(preset) {
         frequencyValue.className = 'slider-value';
         frequencyValue.textContent = frequency.toFixed(1);
         
-        const nexusSliderPlaceholder = document.createElement('div');
-        nexusSliderPlaceholder.id = `freq-slider-container-${index}`;
+        const nexusDialPlaceholder = document.createElement('div');
+        nexusDialPlaceholder.id = `freq-dial-container-${index}`;
 
-        const magnitudeLabel = document.createElement('div');
-        magnitudeLabel.textContent = 'Magnitude';
-        magnitudeLabel.className = 'slider-label';
+        // const magnitudeLabel = document.createElement('div');
+        // magnitudeLabel.textContent = 'Magnitude';
+        // magnitudeLabel.className = 'slider-label';
 
-        const magnitudeValue = document.createElement('span');
-        magnitudeValue.className = 'slider-value';
-        magnitudeValue.textContent = magnitude.toFixed(3);
+        // const magnitudeValue = document.createElement('span');
+        // magnitudeValue.className = 'slider-value';
+        // magnitudeValue.textContent = magnitude.toFixed(3);
 
         const nexusMagPlaceholder = document.createElement('div');
         nexusMagPlaceholder.id = `mag-slider-container-${index}`;
@@ -381,29 +391,30 @@ function updatePresetUI(preset) {
         // 3. APPEND EVERYTHING TO THE ROW IN THE CORRECT LAYOUT ORDER
         row.appendChild(label);
         row.appendChild(frequencyLabel);
-        row.appendChild(nexusSliderPlaceholder); 
+        row.appendChild(nexusDialPlaceholder); 
         row.appendChild(frequencyValue);
-        row.appendChild(magnitudeLabel);
-        // row.appendChild(nexusMagPlaceholder); // 👈 New placeholder injected here
-        //row.appendChild(magSlider);              
-        // row.appendChild(magnitudeValue); comenting out to
+        // row.appendChild(magnitudeLabel);
+  
         // avoid displaying the magnitude value and doing a multislider
         
         // 4. INJECT THE COMPLETE ROW INTO THE CONTAINER
         slidersContainer.appendChild(row);
 
-        // 5. NOW INITIALIZE NEXUSUI (Passing the raw ID string without '#')
-        const freqSlider = new Nexus.Slider(`freq-slider-container-${index}`, {
-            size: [90, 25], 
-            min: frequency * 0.75,
-            max: frequency * 1.25,
-            step: Math.max(0.1, frequency * 0.001),
-            value: frequency
+   // 4. INITIALIZE THE NEXUS DIAL
+        // Maps the Dial rotation from min (75% frequency) to max (125% frequency)
+        const freqDial = new Nexus.Dial(`freq-dial-container-${index}`, {
+            'size': [50, 50],
+            'interaction': 'radial', // "radial", "vertical", or "horizontal"
+            'mode': 'relative',    // "absolute" or "relative"
+            'min': frequency * 0.75,
+            'max': frequency * 1.25,
+            'step': Math.max(0.1, frequency * 0.001),
+            'value': frequency
         });
         
-        freqSlider.colorize("accent", "#3498db");
+        freqDial.colorize("accent", "#d57214");
 
-        freqSlider.on('change', (value) => {
+        freqDial.on('change', (value) => {
             console.log(value);
 
             frequencyValue.textContent = value.toFixed(1);
@@ -413,28 +424,7 @@ function updatePresetUI(preset) {
                 channels[index].osc.frequency.value = value;
             }
         });
-        // // 5. INITIALIZE MAGNITUDE SLIDER
-        // const magSlider = new Nexus.Slider(`mag-slider-container-${index}`, {
-        //     size: [120, 25], 
-        //     min: 0,
-        //     max: 1,
-        //     step: 0.001,
-        //     value: magnitude
-        // });
-        // magSlider.colorize("accent", "#7d9bff"); // Gives it a distinct purple/indigo color
-        
-        // magSlider.on('change', (value) => {
-        //     magnitudeValue.textContent = value.toFixed(3);
-        //     channelSettings[index].desiredMagnitude = value;
 
-        //     if (channels[index] && channels[index].sliderGain) {
-        //         const gainParam = channels[index].sliderGain.gain;
-        //         const now = audioContext?.currentTime || 0;
-        //         gainParam.cancelScheduledValues(now);
-        //         gainParam.setValueAtTime(gainParam.value, now);
-        //         gainParam.linearRampToValueAtTime(value, now + 0.02);
-        //     }
-        // });
     });
     // 1. Target your new HTML container
     const multisliderContainer = document.getElementById('magnitude-multislider');
@@ -658,7 +648,7 @@ function createAudioGraph(preset) {
     // Create a dedicated downmix node explicitly for the spectrogram/visualizer
 
     vizMixer = context.createGain();
-    vizMixer.gain.value = 0.35; // Global scaling so the visualizer doesn't clip
+    vizMixer.gain.value = 0.9; // Global scaling so the visualizer doesn't clip
 
     if (!stereoPreviewEnabled) {
         // Installation Mode: Create the single 24-input hardware merger
@@ -725,17 +715,23 @@ function createAudioGraph(preset) {
         const amOscGain = context.createGain();
         amOscGain.gain.value = amplitudeMod.depth;
         amOsc.connect(amOscGain).connect(amGain.gain); // AM oscillator modulates the gain.
-        
-        const channelAttackDuration = adsr.attack_time + (adsr.attack_per_partial * (harm_rank - 1));
+        const maxAllowedAttack = Math.max(0.01, (releaseStart - startTime) * 0.5); //preventing attack being longer than half the sound
+        const channelAttackDuration = Math.min(
+            adsr.attack_time + (adsr.attack_per_partial * (harm_rank - 1)), 
+            maxAllowedAttack
+        );
         const channelAttackEnd = startTime + channelAttackDuration;
-        const channelDecayEnd = channelAttackEnd + adsr.decay_time;
-        const channelSustainLevel = Math.max(adsr.sustain_level * Math.exp(-0.25 * (harm_rank - 1)), 0.1);
+        const maxAllowedDecay = Math.max(0.01, releaseStart - channelAttackEnd);
+        const channelDecayDuration = Math.min(adsr.decay_time, maxAllowedDecay);
+        const channelDecayEnd = channelAttackEnd + channelDecayDuration;
+        const channelSustainLevel = Math.max(adsr.sustain_level * Math.exp(-0.05 * (harm_rank - 1)), 0.2); 
+        // TWEAK the exp level (original was 0.15) and the minimum sustain level
         const channelReleaseStart = Math.max(endTime - adsr.release_time, channelDecayEnd);
 
         const envGain = context.createGain();
         envGain.gain.setValueAtTime(0.0, startTime); // Start silent.
         envGain.gain.linearRampToValueAtTime(1.0, channelAttackEnd); // Attack up.
-        envGain.gain.linearRampToValueAtTime(channelSustainLevel, channelDecayEnd); // Decay to sustain.
+        envGain.gain.exponentialRampToValueAtTime(Math.max(channelSustainLevel, 0.0001), channelDecayEnd); // Smooth curve decay
         envGain.gain.setValueAtTime(channelSustainLevel, channelReleaseStart); // Hold sustain.
         envGain.gain.linearRampToValueAtTime(0.0, endTime); // Release down.
 
